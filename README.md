@@ -1,200 +1,143 @@
-# BESS-using-Solar-PV-Array
-A Battery Energy Storage system using Solar PV array with the help of Boost converter
+# ☀️🔋 SolarVault: BESS using Solar PV Array
 
-This system is a 2-STAGE DC-DC power conversion architecture designed for renewable energy microgrids.
-1. Stage 1 (Boost Converter): Steps up the variable, low voltage from the Solar PV array (150V) to a stable, elevated intermediate DC-bus voltage (270V to 300V) close to 300 V
-2. Stage 2 (Half-Bridge Converter): Operates bidirectionally. When solar generation is high, it operates in Buck mode to step down the DC-bus voltage to smoothly charge the battery (160V). When solar generation drops, it seamlessly switches to Boost mode to extract power from the battery and support the central DC-bus load.
+A 24-hour solar day compressed into 24 seconds: a PV array with **P&O MPPT**, a **boost converter**, a DC bus and a **bidirectional half-bridge converter** that charges and discharges a Li-ion battery. Built in MATLAB/Simulink (Simscape Electrical).
 
-## 2. Design Formulas
-
-### 2.1 Stage 1: PV Boost Converter Sizing
-
-#### 2.1.1 Duty Cycle of the Boost Converter
-
-D_boost = 1 - (V_in / V_out)
-
-**Where:**
-
-- V_in = Solar input voltage (V)
-- V_out = Required boost converter output voltage (V)
+![MATLAB](https://img.shields.io/badge/MATLAB-Simulink-orange) ![Topic](https://img.shields.io/badge/Topic-Power%20Electronics-blue) ![MPPT](https://img.shields.io/badge/MPPT-Perturb%20%26%20Observe-green)
 
 ---
 
-#### 2.1.2 Boost Inductor Selection
+## 1. System Overview
 
-L_boost = (V_in × D_boost) / (ΔI_L × f_s)
+A 2-stage DC-DC architecture for renewable microgrids:
 
-**Where:**
+1. **Stage 1: Boost converter + MPPT.** Steps the PV voltage (~270 V at MPP) up to the DC bus (400 V reference). A Perturb & Observe algorithm adjusts the duty ratio to extract maximum PV power.
+2. **Stage 2: Bidirectional half-bridge converter.** Controlled by a PI loop on the bus voltage. It operates in **buck mode** to charge the battery when PV power is in surplus, and in **boost mode** to discharge the battery when PV is low or absent (night).
 
-- V_in = Solar input voltage (V)
-- D_boost = Boost converter duty cycle
-- ΔI_L = Peak-to-peak inductor current ripple (A)
-- f_s = Switching frequency (Hz)
-
----
-
-#### 2.1.3 PV Input Capacitor Selection
-
-C_in_pv = (I_out × D_boost) / (ΔV_in × f_s)
-
-**Where:**
-
-- I_out = Boost converter output current (A)
-- D_boost = Boost converter duty cycle
-- ΔV_in = Allowed PV input voltage ripple (V)
-- f_s = Switching frequency (Hz)
+```mermaid
+flowchart LR
+  Sun[Irradiance profile] --> PV[PV array 10.8 kW]
+  PV --> Boost[Boost converter]
+  MPPT[P&O MPPT] --> Boost
+  Boost --> Bus[400 V DC bus + load]
+  Bus <--> HB[Bidirectional half-bridge]
+  PI[PI voltage control] --> HB
+  HB <--> Bat[150 V Li-ion battery]
+```
 
 ---
 
-### 2.2 Intermediate DC-Link Design
+## 2. System Parameters
 
-#### 2.2.1 DC-Link Capacitor Selection
-
-C_dc_link = (I_load × D_max) / (ΔV_out × f_s)
-
-**Where:**
-
-- I_load = Load current (A)
-- D_max = Maximum converter duty cycle
-- ΔV_out = Allowed DC-link voltage ripple (V)
-- f_s = Switching frequency (Hz)
-
----
-
-#### 2.2.2 Load Resistance Calculation
-
-R_load = (V_dc²) / P_load
-
-**Where:**
-
-- V_dc = DC-link voltage (V)
-- P_load = Total load power (W)
+| Block | Parameter | Value |
+|---|---|---|
+| PV array | Max power | 10.8 kW (1000 W/m², 25 °C) |
+| | Voc / Isc | 300 V / 41.2 A |
+| | Vmp / Imp | 270 V / 40 A |
+| | Cell temperature | 25 °C (constant) |
+| Boost converter | Switching frequency | 10 kHz |
+| | Initial duty | 1 − 270/400 ≈ 0.325 |
+| DC bus | Reference voltage | 400 V |
+| | Load resistor | [40 Ω] (~4 kW at 400 V) |
+| Half-bridge | Battery-side duty (D = Vbatt/Vbus) | ≈ 0.375 |
+| Battery | Type / nominal voltage | Li-ion / 150 V |
+| | Capacity | 0.0139 Ah (50 Ah / 3600, time-scaled) |
+| | Initial SOC | 50 % |
+| | Response time | 0.1 s |
+| Solver | powergui | Discrete, 2e-6 s |
 
 ---
 
-### 2.3 Stage 2: Synchronous Half-Bridge Converter Sizing
+## 3. The "Day in 24 Seconds" Idea
 
-#### 2.3.1 Charging Duty Cycle
-
-D_hb = V_batt / V_out
-
-**Where:**
-
-- V_batt = Battery bank voltage (V)
-- V_out = DC-link voltage (V)
+The irradiance profile (`irradiance_profile.m`) is a `[time, W/m²]` array where **1 s of simulation = 1 hour**. It is zero at night, starts at 20 W/m² at hour 5, peaks at **1000 W/m² at hour 13** and returns to zero by hour 22. To make SOC visibly change in 24 s, the battery capacity is scaled by 1/3600.
 
 ---
 
-#### 2.3.2 Battery Filter Inductor Selection
+## 4. MPPT: Perturb & Observe
 
-L_batt = ((V_out - V_batt) × D_hb) / (ΔI_batt × f_s)
+`MPPT_PO.m` runs every **5 ms** (slower than the converter dynamics):
 
-**Where:**
+1. Averages Vpv and Ipv over the 5 ms window to remove switching ripple.
+2. Computes P = V·I, dV and dP against the previous update.
+3. For a boost converter, raising D lowers Vpv, so:
+   - power up and voltage up → **decrease D**
+   - power down and voltage up → **increase D**
+4. Step size ΔD = 0.002, D limited to 0.25 – 0.60, direction reverses at a limit.
+5. When P < 1 W (night), D resets to 0.325.
 
-- V_out = DC-link voltage (V)
-- V_batt = Battery bank voltage (V)
-- D_hb = Half-bridge duty cycle
-- ΔI_batt = Battery charging current ripple (A)
-- f_s = Switching frequency (Hz)
-
----
-
-### 2.4 Closed-Loop PI Controller
-
-#### 2.4.1 PI Controller Transfer Function
-
-G_c(s) = K_p + (K_i / s)
-
-**Where:**
-
-- K_p = Proportional gain
-- K_i = Integral gain
-- s = Laplace complex frequency variable
-
-# 3. Primary Commercial Applications
-
-## 3.1 Solar PV Energy Storage Systems (ESS)
-
-In standard grid-tied or off-grid solar power systems, solar panels cannot directly charge a battery bank efficiently or safely.
-
-### The Problem
-
-- Solar panel output voltage varies continuously with solar irradiance and temperature.
-- Batteries require a regulated charging voltage and current to prevent overcharging, overheating, and reduced battery life.
-
-### Proposed Solution
-
-- **Stage 1 (Boost Converter):** Converts the variable PV voltage (approximately **150 V**) into a stable high-voltage DC bus (**270–300 V**).
-- **Stage 2 (Synchronous Half-Bridge Converter):** Steps the DC bus voltage down to the required battery charging voltage (**160 V**) while providing controlled charging current.
-
-This two-stage architecture ensures efficient power extraction from the PV array and safe battery charging.
+Dmppt is converted to gate pulses through a **PWM Generator (DC-DC)** block at 10 kHz.
 
 ---
 
-## 3.2 Electric Vehicle (EV) Regenerative Fast-Charging Stations
+## 5. Results
 
-The proposed converter topology is well suited for modern EV charging infrastructure.
+| Plot | Observation |
+|---|---|
+| Dmppt | Tracks irradiance through the day, held at 0.325 at night |
+| Vpv / Vboost | PV voltage follows the MPP while the boost output rises with the PV power |
+| Battery | Current is negative (charging) in daylight, SOC rises from ~51.6 % to ~53.6 % |
 
-### Forward Power Flow
-
-PV Array → Boost Converter → DC Bus → Half-Bridge Converter → EV Battery
-
-### Bidirectional Operation
-
-Because the half-bridge converter is bidirectional, power can also flow in the reverse direction.
-
-Battery → Half-Bridge Converter → DC Bus → External Load / Grid
-
-This enables:
-
-- Vehicle-to-Grid (V2G) operation
-- Peak load management
-- Renewable energy integration
-- Backup power support
+*(Add screenshots in `results/` and link them here: `![Dmppt](results/dmppt.png)`)*
 
 ---
 
-## 3.3 Uninterruptible Power Supplies (UPS) and Data Centers
+## 6. Challenges and Lessons Learned
 
-Modern data centers rely on uninterrupted DC power for continuous operation.
-
-### Proposed System Operation
-
-- During normal operation, the boost converter harvests renewable energy and maintains the DC bus.
-- The half-bridge converter continuously charges the battery bank.
-- During a power outage, the converter instantly reverses power flow and supplies stored battery energy to the DC bus.
-- The transition occurs rapidly, allowing uninterrupted power delivery to critical loads.
-
-This makes the converter suitable for online UPS and energy backup applications.
+- **MPPT saturated at its duty limit** because it ran at the solver step (microseconds). Fix: a slow 5 ms update with averaging.
+- **Sample time must match powergui.** A wrong `Ts` in the code changed the MPPT update rate from 5 ms to 0.5 s.
+- **A PWM needs enough samples per switching cycle.** A 20 kHz sawtooth with a 50 µs solver step could not form a duty cycle. The fix was a smaller powergui step.
+- **Duty limits must agree with the bus voltage.** Vpv = Vbus × (1 − D), so D cannot go below 1 − Voc/Vbus ≈ 0.25.
+- **P&O under changing irradiance** can misread an irradiance-driven power rise as the effect of its own perturbation.
 
 ---
 
-# 4. Academic and Engineering Contributions
+## 7. Known Limitations and Future Work
 
-The proposed model demonstrates several important concepts in modern power electronics.
-
-## 4.1 Decoupled Two-Stage Converter Architecture
-
-- Separates the PV generation stage from the battery charging stage.
-- Improves stability by isolating the switching dynamics of both converters.
-- Enables independent control of the PV source and battery load.
+- The DC bus is **not yet held at 400 V**. It varies from about 140 V (night) to about 600 V (peak sun) because the battery stage current is limited and the PI loop needs retuning.
+- Add a bus overvoltage limit so the MPPT backs off when the battery cannot absorb more.
+- Add a bus capacitor sized for the ripple requirement and retune the PI gains.
+- Try Incremental Conductance MPPT and compare it with P&O.
+- Add a variable load profile and a realistic battery capacity (without time scaling).
 
 ---
 
-## 4.2 Synchronous Rectification
+## 8. How to Run
 
-- Uses complementary MOSFET switching instead of conventional diode rectification.
-- Reduces conduction losses.
-- Improves converter efficiency.
-- Minimizes thermal stress in practical hardware implementations.
+1. Open `model/pv_boost_battery.slx` in MATLAB/Simulink (Simscape Electrical required).
+2. Run `code/irradiance_profile.m` to create `irradianceprofile` in the workspace.
+3. Set the stop time to **24 s**, powergui to Discrete 2e-6 s.
+4. Click **Run** and open the scopes.
 
 ---
 
-## 4.3 Closed-Loop PI Control
+## 9. Repository Structure
 
-- Employs a PI controller for automatic regulation of the converter output.
-- Reduces startup transients and overshoot.
-- Maintains stable battery charging conditions.
-- Provides steady-state operation under varying load and input conditions.
+```
+SolarVault/
+├── README.md
+├── model/        # Simulink model (.slx)
+├── code/         # MPPT_PO.m, irradiance_profile.m
+├── results/      # scope screenshots
+└── docs/         # design_notes.md, block diagram
+```
 
-The closed-loop control system ensures reliable converter performance and improved dynamic response.
+## 10. Applications
+
+- Solar PV energy storage systems (ESS)
+- EV charging stations with V2G capability
+- UPS and data-center DC backup
+- Renewable energy microgrids
+
+## 11. Concepts Demonstrated
+
+- Two-stage decoupled converter architecture
+- MPPT (Perturb & Observe) for a boost converter
+- Bidirectional buck/boost battery interface
+- Closed-loop PI voltage control
+- Time-scaled simulation of a daily solar cycle
+
+---
+
+## License
+
+MIT License
